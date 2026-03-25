@@ -1,0 +1,136 @@
+workflow: award-lifecycle
+version: 1
+entity: Award
+description: Workflow controlling recommendation-based award records through approval and downstream purchasing handoff.
+
+states:
+  - DRAFT
+  - PENDING_APPROVAL
+  - APPROVED
+  - REJECTED
+  - CANCELLED
+  - PO_PENDING
+  - PO_CREATED
+
+initialState: DRAFT
+
+transitions:
+  - name: submit_for_approval
+    from:
+      - DRAFT
+      - REJECTED
+    to: PENDING_APPROVAL
+    actorRoles:
+      - BUYER
+    guards:
+      - winning_submission_is_eligible
+      - rationale_present
+      - evaluation_summary_snapshot_present
+      - award_amount_is_valid
+    effects:
+      - set_submitted_for_approval_at
+      - write_audit_event: AWARD_SUBMITTED_FOR_APPROVAL
+
+  - name: approve
+    from:
+      - PENDING_APPROVAL
+    to: APPROVED
+    actorRoles:
+      - APPROVER
+    guards:
+      - approval_policy_satisfied
+    effects:
+      - set_approved_at
+      - write_audit_event: AWARD_APPROVED
+
+  - name: reject
+    from:
+      - PENDING_APPROVAL
+    to: REJECTED
+    actorRoles:
+      - APPROVER
+    guards:
+      - rejection_reason_present
+    effects:
+      - set_rejected_at
+      - write_audit_event: AWARD_REJECTED
+
+  - name: cancel
+    from:
+      - DRAFT
+      - PENDING_APPROVAL
+      - APPROVED
+      - REJECTED
+    to: CANCELLED
+    actorRoles:
+      - BUYER
+      - APPROVER
+    guards:
+      - cancellation_reason_present
+      - cancellation_policy_satisfied
+    effects:
+      - set_cancelled_at
+      - write_audit_event: AWARD_CANCELLED
+
+  - name: request_purchase_order_generation
+    from:
+      - APPROVED
+    to: PO_PENDING
+    actorRoles:
+      - BUYER
+      - SYSTEM
+    guards:
+      - downstream_po_allowed
+      - purchase_order_not_already_created
+    effects:
+      - write_audit_event: PURCHASE_ORDER_GENERATION_REQUESTED
+
+  - name: mark_purchase_order_created
+    from:
+      - PO_PENDING
+    to: PO_CREATED
+    actorRoles:
+      - SYSTEM
+    guards:
+      - purchase_order_exists
+    effects:
+      - write_audit_event: PURCHASE_ORDER_GENERATED
+
+guards:
+  winning_submission_is_eligible:
+    description: Winning submission must belong to the same event and not be disqualified.
+
+  rationale_present:
+    description: Award rationale is mandatory.
+
+  evaluation_summary_snapshot_present:
+    description: Snapshot of award basis must be stored.
+
+  award_amount_is_valid:
+    description: Amount must be valid under policy and commercial basis.
+
+  approval_policy_satisfied:
+    description: Award approval thresholds and routing must be met.
+
+  rejection_reason_present:
+    description: Rejection must record reason.
+
+  cancellation_reason_present:
+    description: Cancellation requires an explicit reason.
+
+  cancellation_policy_satisfied:
+    description: Cancellation must obey policy and downstream constraints.
+
+  downstream_po_allowed:
+    description: Event and award policy permit PO generation from approved award.
+
+  purchase_order_not_already_created:
+    description: Action must be idempotent and not duplicate downstream commitment.
+
+  purchase_order_exists:
+    description: Downstream PO record exists and is linked.
+
+notes:
+  - APPROVED is the business approval state for the award decision.
+  - PO_PENDING and PO_CREATED separate award approval from downstream execution.
+  - PO creation must not be inferred automatically unless policy explicitly defines that behavior.

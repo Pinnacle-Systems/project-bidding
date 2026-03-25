@@ -1,0 +1,230 @@
+workflow: bid-event-lifecycle
+version: 1
+entity: BidEvent
+description: Workflow controlling the lifecycle of a sourcing event from draft through award.
+
+states:
+  - DRAFT
+  - PENDING_APPROVAL
+  - APPROVED
+  - PUBLISHED
+  - CLOSED
+  - EVALUATING
+  - AWARD_PENDING_APPROVAL
+  - AWARDED
+  - REJECTED
+  - CANCELLED
+
+initialState: DRAFT
+
+transitions:
+  - name: submit_for_approval
+    from:
+      - DRAFT
+      - REJECTED
+    to: PENDING_APPROVAL
+    actorRoles:
+      - BUYER
+    guards:
+      - has_at_least_one_active_line
+      - submission_deadline_in_future
+      - schedule_is_valid
+      - evaluation_mode_is_configured
+      - publication_mode_is_configured
+    effects:
+      - write_audit_event: BID_EVENT_SUBMITTED_FOR_APPROVAL
+
+  - name: approve
+    from:
+      - PENDING_APPROVAL
+    to: APPROVED
+    actorRoles:
+      - APPROVER
+    guards:
+      - approval_policy_satisfied
+    effects:
+      - write_audit_event: BID_EVENT_APPROVED
+
+  - name: reject
+    from:
+      - PENDING_APPROVAL
+      - AWARD_PENDING_APPROVAL
+    to: REJECTED
+    actorRoles:
+      - APPROVER
+    guards:
+      - rejection_reason_present
+    effects:
+      - write_audit_event: BID_EVENT_REJECTED
+
+  - name: publish
+    from:
+      - APPROVED
+    to: PUBLISHED
+    actorRoles:
+      - BUYER
+    guards:
+      - current_time_before_submission_deadline
+      - if_publication_mode_is_invite_only_then_has_eligible_invitations
+      - published_structure_is_complete
+    effects:
+      - set_publish_at_if_missing
+      - send_vendor_notifications
+      - write_audit_event: BID_EVENT_PUBLISHED
+
+  - name: extend_deadline
+    from:
+      - PUBLISHED
+    to: PUBLISHED
+    actorRoles:
+      - BUYER
+      - APPROVER
+    guards:
+      - new_deadline_is_later_than_existing_deadline
+      - extension_policy_satisfied
+      - event_not_already_closed
+    effects:
+      - update_submission_deadline
+      - notify_all_visible_vendors_equally
+      - write_audit_event: BID_EVENT_DEADLINE_EXTENDED
+
+  - name: close
+    from:
+      - PUBLISHED
+    to: CLOSED
+    actorRoles:
+      - SYSTEM
+      - BUYER
+    guards:
+      - current_time_at_or_after_submission_deadline_or_manual_close_allowed
+    effects:
+      - mark_closed_at
+      - lock_or_resolve_open_submission_states_according_to_policy
+      - write_audit_event: BID_EVENT_CLOSED
+
+  - name: start_evaluation
+    from:
+      - CLOSED
+    to: EVALUATING
+    actorRoles:
+      - BUYER
+    guards:
+      - closing_actions_completed
+      - bid_opening_completed_if_required
+    effects:
+      - write_audit_event: BID_EVENT_EVALUATION_STARTED
+
+  - name: move_to_award
+    from:
+      - EVALUATING
+    to: AWARD_PENDING_APPROVAL
+    actorRoles:
+      - BUYER
+    guards:
+      - evaluation_completed
+      - recommendation_exists
+      - award_basis_is_consistent_with_policy
+    effects:
+      - write_audit_event: BID_EVENT_AWARD_SUBMITTED
+
+  - name: finalize_award
+    from:
+      - AWARD_PENDING_APPROVAL
+    to: AWARDED
+    actorRoles:
+      - APPROVER
+    guards:
+      - award_record_exists
+      - award_approval_policy_satisfied
+    effects:
+      - set_awarded_at
+      - notify_winning_and_unsuccessful_vendors_per_policy
+      - write_audit_event: BID_EVENT_AWARDED
+
+  - name: cancel
+    from:
+      - DRAFT
+      - APPROVED
+      - PUBLISHED
+      - CLOSED
+      - EVALUATING
+      - REJECTED
+    to: CANCELLED
+    actorRoles:
+      - BUYER
+      - APPROVER
+    guards:
+      - cancellation_reason_present
+      - no_irreversible_downstream_commitment
+    effects:
+      - notify_affected_parties_if_required
+      - write_audit_event: BID_EVENT_CANCELLED
+
+guards:
+  has_at_least_one_active_line:
+    description: Event must contain at least one active bid line.
+
+  submission_deadline_in_future:
+    description: Submission deadline must be later than current server time.
+
+  schedule_is_valid:
+    description: Publish, clarification, and submission deadlines must be chronologically valid.
+
+  evaluation_mode_is_configured:
+    description: Event evaluation mode must be set.
+
+  publication_mode_is_configured:
+    description: Event publication mode must be set.
+
+  current_time_before_submission_deadline:
+    description: Publish cannot occur after the submission deadline.
+
+  if_publication_mode_is_invite_only_then_has_eligible_invitations:
+    description: Invite-only events require at least one valid invitation.
+
+  published_structure_is_complete:
+    description: Event must have complete vendor-visible bidding structure.
+
+  new_deadline_is_later_than_existing_deadline:
+    description: Deadline extensions may only move the deadline forward.
+
+  extension_policy_satisfied:
+    description: Deadline extension must satisfy configured governance policy.
+
+  event_not_already_closed:
+    description: Closed events cannot be extended without explicit reopen flow.
+
+  current_time_at_or_after_submission_deadline_or_manual_close_allowed:
+    description: Event may close when deadline has passed or governed manual close is allowed.
+
+  closing_actions_completed:
+    description: Required close-time processing must be complete.
+
+  bid_opening_completed_if_required:
+    description: Bid opening ceremony/step must be complete when policy requires it.
+
+  evaluation_completed:
+    description: Required evaluation activities have reached completion.
+
+  recommendation_exists:
+    description: At least one valid recommendation or decision basis exists.
+
+  award_basis_is_consistent_with_policy:
+    description: Proposed award path must align to evaluation mode and configured policy.
+
+  award_record_exists:
+    description: At least one award record has been created for approval.
+
+  award_approval_policy_satisfied:
+    description: Approval requirements for award have been met.
+
+  cancellation_reason_present:
+    description: Cancellation requires an explicit reason.
+
+  no_irreversible_downstream_commitment:
+    description: Cancellation is blocked after irreversible downstream commitment unless exceptional policy exists.
+
+notes:
+  - PUBLISHED is the only state in which vendor submission is normally allowed.
+  - AWARD_PENDING_APPROVAL exists on the event to represent event-level progression, distinct from the Award entity’s own workflow.
+  - REJECTED allows revision and resubmission for approval.

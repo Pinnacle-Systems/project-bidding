@@ -1,0 +1,207 @@
+entity: Award
+version: 1
+description: >
+  Governed decision selecting one or more vendor submissions for all or part of a bid event.
+  An award must trace to a valid evaluation and approval path.
+
+ownership:
+  tenantScoped: true
+  aggregateRoot: true
+  tenantField: tenant_id
+
+identity:
+  primaryKey: id
+  businessKeys:
+    - award_no
+
+table:
+  name: awards
+
+fields:
+  id:
+    type: uuid
+    required: true
+    immutable: true
+
+  tenant_id:
+    type: uuid
+    required: true
+    immutable: true
+
+  award_no:
+    type: string
+    required: true
+    immutable: true
+    uniqueWithinTenant: true
+
+  bid_event_id:
+    type: uuid
+    required: true
+    references: BidEvent.id
+    immutable: true
+
+  winning_submission_id:
+    type: uuid
+    required: true
+    references: BidSubmission.id
+    immutable: true
+    description: Winning submission for whole-event award or root selection record.
+
+  award_scope:
+    type: enum
+    required: true
+    values:
+      - WHOLE_EVENT
+      - LINE_LEVEL
+      - SPLIT_AWARD
+      - PARTIAL_SCOPE
+
+  status:
+    type: workflow_state
+    required: true
+    workflow: award-lifecycle
+
+  decision_basis:
+    type: enum
+    required: true
+    values:
+      - LOWEST_COMPLIANT_PRICE
+      - WEIGHTED_SCORE
+      - BEST_VALUE
+      - NEGOTIATED_OUTCOME
+      - OTHER_POLICY_DEFINED
+
+  awarded_amount:
+    type: decimal
+    required: true
+    precision: 18
+    scale: 4
+
+  currency:
+    type: string
+    required: true
+    maxLength: 3
+
+  rationale:
+    type: text
+    required: true
+
+  evaluation_summary_snapshot:
+    type: json
+    required: true
+    description: Structured summary of recommendation basis at time of award submission.
+
+  submitted_for_approval_at:
+    type: datetime
+    required: false
+
+  approved_at:
+    type: datetime
+    required: false
+
+  rejected_at:
+    type: datetime
+    required: false
+
+  cancelled_at:
+    type: datetime
+    required: false
+
+  created_by:
+    type: uuid
+    required: true
+
+  updated_by:
+    type: uuid
+    required: true
+
+  created_at:
+    type: datetime
+    required: true
+    immutable: true
+
+  updated_at:
+    type: datetime
+    required: true
+
+relationships:
+  bid_event:
+    type: belongsTo
+    entity: BidEvent
+    foreignKey: bid_event_id
+
+  winning_submission:
+    type: belongsTo
+    entity: BidSubmission
+    foreignKey: winning_submission_id
+
+snapshots:
+  required:
+    - evaluation recommendation summary
+    - winning commercial basis
+    - policy basis for award decision
+    - vendor identity needed for historical interpretation
+  rationale: >
+    Award decisions must remain understandable even if evaluations, vendors,
+    or downstream purchasing details later evolve.
+
+invariants:
+  - award tenant must match event tenant
+  - winning submission must belong to same bid_event_id
+  - winning submission must be eligible and not disqualified
+  - rationale must be present for all awards
+  - approved_at is required when status is APPROVED
+  - rejected_at is required when status is REJECTED
+  - cancelled_at is required when status is CANCELLED
+  - awarded_amount must be greater than or equal to zero
+  - decision basis must be consistent with event evaluation mode and policy
+  - award approval must occur before downstream purchase order generation
+  - award record must be traceable to completed evaluation or explicit governed exception
+
+derived:
+  is_final:
+    dependsOn:
+      - status
+    rule: >
+      True when status is APPROVED, REJECTED, or CANCELLED.
+
+mutations:
+  allowedBeforeApproval:
+    - edit rationale
+    - edit summary snapshot
+    - edit amount if recommendation changes before submission
+  forbiddenAfterApproval:
+    - changing winning submission
+    - changing decision basis
+    - changing awarded amount without explicit superseding award flow
+  governedActions:
+    - submit_for_approval
+    - approve
+    - reject
+    - cancel
+    - create_downstream_purchase_order
+
+authorizations:
+  buyer:
+    - create recommendation-based award record
+    - submit for approval
+  approver:
+    - approve
+    - reject
+    - cancel according to policy
+  vendor:
+    - no direct mutation
+
+audit:
+  requiredEvents:
+    - AWARD_CREATED
+    - AWARD_SUBMITTED_FOR_APPROVAL
+    - AWARD_APPROVED
+    - AWARD_REJECTED
+    - AWARD_CANCELLED
+    - PURCHASE_ORDER_GENERATION_REQUESTED
+    - PURCHASE_ORDER_GENERATED
+
+integrationNotes:
+  - approved award may trigger vendor notifications
+  - purchase order generation must remain downstream and idempotent

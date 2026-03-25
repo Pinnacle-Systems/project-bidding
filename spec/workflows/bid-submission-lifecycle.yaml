@@ -1,0 +1,145 @@
+workflow: bid-submission-lifecycle
+version: 1
+entity: BidSubmission
+description: Workflow controlling vendor submission drafts, finalization, locking, and disqualification.
+
+states:
+  - DRAFT
+  - FINALIZED
+  - LOCKED
+  - REOPENED
+  - DISQUALIFIED
+  - SUPERSEDED
+
+initialState: DRAFT
+
+transitions:
+  - name: save_draft
+    from:
+      - DRAFT
+      - REOPENED
+    to: DRAFT
+    actorRoles:
+      - VENDOR
+    guards:
+      - submission_is_editable_by_vendor
+    effects:
+      - recalculate_derived_totals_if_needed
+      - write_audit_event: BID_SUBMISSION_DRAFT_UPDATED
+
+  - name: finalize
+    from:
+      - DRAFT
+      - REOPENED
+    to: FINALIZED
+    actorRoles:
+      - VENDOR
+    guards:
+      - event_is_open_for_submission
+      - current_time_before_submission_deadline
+      - required_documents_present
+      - required_declarations_completed
+      - payload_is_structurally_valid
+    effects:
+      - assign_receipt_no_if_missing
+      - set_finalized_at
+      - write_audit_event: BID_SUBMISSION_FINALIZED
+
+  - name: lock
+    from:
+      - FINALIZED
+    to: LOCKED
+    actorRoles:
+      - SYSTEM
+      - BUYER
+    guards:
+      - event_closed_or_lock_step_triggered
+    effects:
+      - set_locked_at
+      - write_audit_event: BID_SUBMISSION_LOCKED
+
+  - name: reopen_if_policy_allows
+    from:
+      - FINALIZED
+    to: REOPENED
+    actorRoles:
+      - VENDOR
+      - BUYER
+    guards:
+      - reopen_policy_satisfied
+      - current_time_before_submission_deadline
+      - event_still_open_for_submission
+    effects:
+      - preserve_revision_history
+      - write_audit_event: BID_SUBMISSION_REOPENED
+
+  - name: disqualify
+    from:
+      - FINALIZED
+      - LOCKED
+    to: DISQUALIFIED
+    actorRoles:
+      - BUYER
+      - EVALUATOR
+    guards:
+      - disqualification_reason_present
+      - disqualification_policy_satisfied
+    effects:
+      - write_audit_event: BID_SUBMISSION_DISQUALIFIED
+
+  - name: supersede_with_new_version
+    from:
+      - FINALIZED
+      - REOPENED
+    to: SUPERSEDED
+    actorRoles:
+      - SYSTEM
+      - VENDOR
+    guards:
+      - new_higher_version_exists_for_same_vendor_and_event
+    effects:
+      - mark_not_latest
+      - write_audit_event: BID_SUBMISSION_SUPERSEDED
+
+guards:
+  submission_is_editable_by_vendor:
+    description: Submission must still be editable according to event state and deadline.
+
+  event_is_open_for_submission:
+    description: Parent event must be open for vendor submissions.
+
+  current_time_before_submission_deadline:
+    description: Finalization or vendor edit must occur before deadline.
+
+  required_documents_present:
+    description: Required event documents must be attached.
+
+  required_declarations_completed:
+    description: Required certifications or declarations must be completed.
+
+  payload_is_structurally_valid:
+    description: Submission payload must satisfy expected schema and pricing structure.
+
+  event_closed_or_lock_step_triggered:
+    description: Lock may occur after event close or governed close-time processing.
+
+  reopen_policy_satisfied:
+    description: Reopen is allowed only by configured policy.
+
+  event_still_open_for_submission:
+    description: Parent event must still allow submission changes.
+
+  disqualification_reason_present:
+    description: Disqualification requires an explicit reason.
+
+  disqualification_policy_satisfied:
+    description: Disqualification must conform to configured procurement policy.
+
+  new_higher_version_exists_for_same_vendor_and_event:
+    description: Superseded state applies when a later version exists.
+
+notes:
+  - FINALIZED means the vendor has officially submitted.
+  - LOCKED represents a non-editable submission after close or equivalent lock action.
+  - REOPENED is optional and should exist only if policy explicitly allows pre-deadline revise-after-finalize behavior.
+  - SUPERSEDED preserves revision lineage rather than destructive overwrite.

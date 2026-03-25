@@ -1,0 +1,270 @@
+entity: BidEvent
+version: 1
+description: >
+  Competitive sourcing event created to solicit bids from vendors for goods or services.
+  Supports invite-only and public publication modes and multiple evaluation modes.
+
+ownership:
+  tenantScoped: true
+  aggregateRoot: true
+  tenantField: tenant_id
+
+identity:
+  primaryKey: id
+  businessKeys:
+    - event_no
+
+table:
+  name: bid_events
+
+fields:
+  id:
+    type: uuid
+    required: true
+    immutable: true
+
+  tenant_id:
+    type: uuid
+    required: true
+    immutable: true
+
+  event_no:
+    type: string
+    required: true
+    immutable: true
+    uniqueWithinTenant: true
+    description: Human-readable event reference number.
+
+  request_id:
+    type: uuid
+    required: false
+    references: ProcurementRequest.id
+    description: Optional originating requisition or sourcing request.
+
+  event_type:
+    type: enum
+    required: true
+    values:
+      - RFQ
+      - RFP
+      - SEALED_TENDER
+      - REVERSE_AUCTION
+
+  title:
+    type: string
+    required: true
+    maxLength: 200
+
+  description:
+    type: text
+    required: false
+
+  publication_mode:
+    type: enum
+    required: true
+    values:
+      - INVITE_ONLY
+      - PUBLIC
+
+  evaluation_mode:
+    type: enum
+    required: true
+    values:
+      - COMMERCIAL_ONLY
+      - TECHNICAL_THEN_COMMERCIAL
+      - WEIGHTED
+
+  submission_mode:
+    type: enum
+    required: true
+    values:
+      - LINE_ITEM
+      - LUMP_SUM
+      - BOTH
+
+  currency:
+    type: string
+    required: true
+    maxLength: 3
+    description: Base event currency for comparison and reporting.
+
+  publish_at:
+    type: datetime
+    required: false
+
+  clarification_deadline_at:
+    type: datetime
+    required: false
+
+  submission_deadline_at:
+    type: datetime
+    required: true
+
+  manual_close_allowed:
+    type: boolean
+    required: true
+    default: false
+
+  status:
+    type: workflow_state
+    required: true
+    workflow: bid-event-lifecycle
+
+  cancellation_reason:
+    type: text
+    required: false
+
+  closed_at:
+    type: datetime
+    required: false
+
+  awarded_at:
+    type: datetime
+    required: false
+
+  created_by:
+    type: uuid
+    required: true
+
+  updated_by:
+    type: uuid
+    required: true
+
+  created_at:
+    type: datetime
+    required: true
+    immutable: true
+
+  updated_at:
+    type: datetime
+    required: true
+
+relationships:
+  lines:
+    type: hasMany
+    entity: BidEventLine
+    foreignKey: bid_event_id
+
+  invitations:
+    type: hasMany
+    entity: VendorInvitation
+    foreignKey: bid_event_id
+
+  submissions:
+    type: hasMany
+    entity: BidSubmission
+    foreignKey: bid_event_id
+
+  awards:
+    type: hasMany
+    entity: Award
+    foreignKey: bid_event_id
+
+  clarifications:
+    type: hasMany
+    entity: Clarification
+    foreignKey: bid_event_id
+
+snapshots:
+  required:
+    - line scope and specifications must be snapshotted into event lines
+    - evaluation policy basis should remain reconstructable after publish
+  rationale: >
+    Vendors bid against the published event definition, not against future changes
+    to requisitions, item masters, or policy settings.
+
+invariants:
+  - submission_deadline_at must be later than created_at
+  - publish_at, when present, must be earlier than submission_deadline_at
+  - clarification_deadline_at, when present, must be earlier than or equal to submission_deadline_at
+  - event cannot be published unless it has at least one active line
+  - invite_only event cannot be published without at least one eligible invitation
+  - evaluation_mode must govern visibility and downstream evaluation behavior
+  - published commercial structure must not be materially altered after publish
+  - closed_at may only be set when status transitions to CLOSED or beyond
+  - cancellation_reason is required when status is CANCELLED
+
+derived:
+  is_open_for_submission:
+    dependsOn:
+      - status
+      - publish_at
+      - submission_deadline_at
+      - closed_at
+    rule: >
+      True only when status is PUBLISHED and server time is before submission_deadline_at
+      and the event has not otherwise been closed.
+
+  is_clarification_open:
+    dependsOn:
+      - status
+      - clarification_deadline_at
+    rule: >
+      True only when status is PUBLISHED and clarification_deadline_at is present
+      and server time is not later than clarification_deadline_at.
+
+mutations:
+  allowedInDraft:
+    - edit title and description
+    - add or remove lines
+    - configure publication_mode
+    - configure evaluation_mode
+    - configure submission_mode
+    - configure schedule
+    - configure document requirements
+    - configure invitations
+  allowedPrePublishAfterApproval:
+    - minor metadata correction if it does not affect vendor-visible meaning
+  forbiddenAfterPublish:
+    - changing evaluation_mode
+    - changing submission_mode in a way that alters vendor response structure
+    - removing published lines
+    - changing base commercial visibility rules
+    - changing publication_mode from PUBLIC to INVITE_ONLY after vendors have seen the event
+  governedActions:
+    - submit_for_approval
+    - approve
+    - reject
+    - publish
+    - extend_deadline
+    - close
+    - cancel
+    - start_evaluation
+    - move_to_award
+    - finalize_award
+
+authorizations:
+  buyer:
+    - create
+    - edit in allowed states
+    - submit for approval
+    - publish when approved
+    - close when policy allows
+    - initiate evaluation
+  approver:
+    - approve
+    - reject
+    - approve award
+    - cancel where policy allows
+  vendor:
+    - view only if invited or public and policy permits
+
+audit:
+  requiredEvents:
+    - BID_EVENT_CREATED
+    - BID_EVENT_UPDATED
+    - BID_EVENT_SUBMITTED_FOR_APPROVAL
+    - BID_EVENT_APPROVED
+    - BID_EVENT_REJECTED
+    - BID_EVENT_PUBLISHED
+    - BID_EVENT_DEADLINE_EXTENDED
+    - BID_EVENT_CLOSED
+    - BID_EVENT_CANCELLED
+    - BID_EVENT_EVALUATION_STARTED
+    - BID_EVENT_AWARD_SUBMITTED
+    - BID_EVENT_AWARDED
+
+integrationNotes:
+  - publishing may trigger vendor notifications
+  - close may trigger submission lock jobs
+  - award finalization may enable purchase order creation

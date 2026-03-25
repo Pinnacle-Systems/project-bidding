@@ -1,0 +1,239 @@
+entity: BidSubmission
+version: 1
+description: >
+  A vendor's response to a bid event. A submission may exist as draft until finalized.
+  Finalized submissions become immutable except through explicitly governed corrective flows.
+
+ownership:
+  tenantScoped: true
+  aggregateRoot: true
+  tenantField: tenant_id
+
+identity:
+  primaryKey: id
+  businessKeys:
+    - receipt_no
+
+table:
+  name: bid_submissions
+
+fields:
+  id:
+    type: uuid
+    required: true
+    immutable: true
+
+  tenant_id:
+    type: uuid
+    required: true
+    immutable: true
+
+  bid_event_id:
+    type: uuid
+    required: true
+    references: BidEvent.id
+    immutable: true
+
+  vendor_id:
+    type: uuid
+    required: true
+    references: Vendor.id
+    immutable: true
+
+  receipt_no:
+    type: string
+    required: false
+    immutable: true
+    uniqueWithinTenant: true
+    description: Assigned on finalization or official submission acceptance.
+
+  version_no:
+    type: integer
+    required: true
+    immutable: true
+    description: Monotonic submission revision number per vendor per event.
+
+  status:
+    type: workflow_state
+    required: true
+    workflow: bid-submission-lifecycle
+
+  technical_payload:
+    type: json
+    required: false
+    description: Vendor-provided technical response content.
+
+  commercial_payload:
+    type: json
+    required: false
+    description: Vendor-provided commercial response content.
+
+  commercial_currency:
+    type: string
+    required: false
+    maxLength: 3
+
+  total_amount:
+    type: decimal
+    required: false
+    precision: 18
+    scale: 4
+
+  tax_amount:
+    type: decimal
+    required: false
+    precision: 18
+    scale: 4
+
+  landed_amount:
+    type: decimal
+    required: false
+    precision: 18
+    scale: 4
+
+  submission_notes:
+    type: text
+    required: false
+
+  finalized_at:
+    type: datetime
+    required: false
+
+  locked_at:
+    type: datetime
+    required: false
+
+  disqualification_reason:
+    type: text
+    required: false
+
+  created_by:
+    type: uuid
+    required: true
+    description: Typically vendor user id.
+
+  updated_by:
+    type: uuid
+    required: true
+
+  created_at:
+    type: datetime
+    required: true
+    immutable: true
+
+  updated_at:
+    type: datetime
+    required: true
+
+relationships:
+  bid_event:
+    type: belongsTo
+    entity: BidEvent
+    foreignKey: bid_event_id
+
+  vendor:
+    type: belongsTo
+    entity: Vendor
+    foreignKey: vendor_id
+
+  lines:
+    type: hasMany
+    entity: BidSubmissionLine
+    foreignKey: bid_submission_id
+
+  evaluations:
+    type: hasMany
+    entity: EvaluationSheet
+    foreignKey: bid_submission_id
+
+snapshots:
+  required:
+    - vendor legal identity or relevant display identity at time of submission
+    - event scope basis needed to interpret line pricing
+    - totals or derived pricing basis needed for later comparison
+  rationale: >
+    Submission interpretation must remain stable even if vendor master records
+    or event-linked master data later change.
+
+invariants:
+  - submission must belong to same tenant as its bid event
+  - vendor must be eligible for the event according to publication and invitation rules
+  - only one active latest version per vendor per event may exist at a time
+  - version_no must increase monotonically for a vendor within an event
+  - finalized_at is required when status is FINALIZED or LOCKED
+  - locked_at is required when status is LOCKED
+  - receipt_no must be assigned upon successful finalization
+  - buyer users must never modify technical_payload or commercial_payload
+  - finalized submission content must remain immutable
+  - draft editing is allowed only before event deadline and while event is open
+  - disqualification_reason is required when status is DISQUALIFIED
+
+derived:
+  is_editable_by_vendor:
+    dependsOn:
+      - status
+      - bid_event.status
+      - bid_event.submission_deadline_at
+    rule: >
+      True only when submission status is DRAFT and the bid event is open for submission
+      and current server time is before the submission deadline.
+
+  is_visible_for_commercial_review:
+    dependsOn:
+      - bid_event.evaluation_mode
+      - bid_event.status
+      - status
+    rule: >
+      Determined by event evaluation mode, workflow stage, and whether the submission
+      remains eligible for commercial opening.
+
+mutations:
+  allowedInDraft:
+    - edit technical_payload
+    - edit commercial_payload
+    - edit notes
+    - add or remove attachments
+    - recalculate totals
+  forbiddenAlways:
+    - buyer mutation of vendor-entered payload
+    - overwriting finalized content in place
+  governedActions:
+    - save_draft
+    - finalize
+    - lock
+    - reopen_if_policy_allows
+    - disqualify
+    - supersede_with_new_version
+
+authorizations:
+  vendor:
+    - create draft
+    - update own draft while editable
+    - finalize own draft
+  buyer:
+    - view according to event visibility rules
+    - disqualify through governed flow where policy allows
+    - never edit payload
+  evaluator:
+    - view according to evaluation visibility rules
+    - never edit payload
+
+audit:
+  requiredEvents:
+    - BID_SUBMISSION_DRAFT_CREATED
+    - BID_SUBMISSION_DRAFT_UPDATED
+    - BID_SUBMISSION_FINALIZED
+    - BID_SUBMISSION_LOCKED
+    - BID_SUBMISSION_REOPENED
+    - BID_SUBMISSION_DISQUALIFIED
+    - BID_SUBMISSION_SUPERSEDED
+
+idempotency:
+  finalize:
+    expected: >
+      Retrying finalization after success must not issue a second receipt number
+      or create duplicate latest versions.
+
+integrationNotes:
+  - deadline close jobs may lock editable drafts or leave them unfinalized according to policy
+  - evaluation services should consume immutable submission snapshots, not mutable working data
